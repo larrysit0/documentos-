@@ -1,0 +1,1 @@
+el script2.js funciona solo con el servidor6.py ello fue la ultima actualizacion gracias a Dios
