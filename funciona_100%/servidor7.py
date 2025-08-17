@@ -26,20 +26,8 @@ TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 # 🌐 URL base de tu servidor (cambiar por tu dominio real)
 BASE_URL = os.getenv('BASE_URL', 'https://tu-servidor.com')
 
-# 🎯 Cliente Twilio (solo si las credenciales están completas)
-client = None
-if TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_FROM_NUMBER:
-    try:
-        client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-        print(f"✅ Twilio configurado correctamente. Número: {TWILIO_FROM_NUMBER}")
-    except Exception as e:
-        print(f"❌ Error configurando Twilio: {e}")
-        client = None
-else:
-    print("⚠️ Credenciales de Twilio incompletas:")
-    print(f"   ACCOUNT_SID: {'✅' if TWILIO_ACCOUNT_SID else '❌'}")
-    print(f"   AUTH_TOKEN: {'✅' if TWILIO_AUTH_TOKEN else '❌'}")
-    print(f"   FROM_NUMBER: {'✅' if TWILIO_FROM_NUMBER else '❌'}")
+# 🎯 Cliente Twilio
+client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 
 # 📝 Diccionario temporal para almacenar el usuario que activó SOS
 usuarios_sos_activos = {}
@@ -73,7 +61,7 @@ def ubicaciones_de_comunidad(comunidad):
     else:
         return jsonify(data)
 
-# 🚨 Alerta roja
+# 🚨 Alerta roja - FUNCIÓN MODIFICADA PARA NO LLAMAR AL REPORTANTE
 @app.route('/api/alert', methods=['POST'])
 def recibir_alerta():
     data = request.get_json()
@@ -159,32 +147,45 @@ def recibir_alerta():
 
     enviar_telegram(telegram_chat_id, mensaje)
 
-    # 📞 Llamar a todos los miembros (SOLO SI TWILIO ESTÁ CONFIGURADO)
-    if client and TWILIO_FROM_NUMBER:
-        llamadas_exitosas = 0
-        llamadas_fallidas = 0
+    # 🔥 NUEVA LÓGICA: Llamar a todos los miembros EXCEPTO al que activó la alarma
+    telegram_id_reportante = None
+    
+    # Obtener el telegram_id del usuario que reporta
+    if telegram_user_id:
+        telegram_id_reportante = str(telegram_user_id)
+    elif comunidad in usuarios_sos_activos:
+        telegram_id_reportante = str(usuarios_sos_activos[comunidad])
+    
+    print(f"🚫 No se llamará al usuario con Telegram ID: {telegram_id_reportante}")
+    
+    llamadas_realizadas = 0
+    llamadas_omitidas = 0
+    
+    for miembro in miembros:
+        telefono = miembro.get('telefono')
+        telegram_id_miembro = str(miembro.get('telegram_id', ''))
         
-        for miembro in miembros:
-            telefono = miembro.get('telefono')
-            if not telefono:
-                print(f"⚠️ {miembro.get('nombre', 'Usuario')} no tiene teléfono registrado")
-                continue
-                
-            try:
-                call = client.calls.create(
-                    twiml='<Response><Say voice="alice" language="es-ES">Emergencia. Alarma vecinal. Revisa tu celular.</Say></Response>',
-                    from_=TWILIO_FROM_NUMBER,
-                    to=telefono
-                )
-                print(f"📞 ✅ Llamada iniciada a {telefono} (SID: {call.sid})")
-                llamadas_exitosas += 1
-            except Exception as e:
-                print(f"❌ Error al llamar a {telefono}: {e}")
-                llamadas_fallidas += 1
-        
-        print(f"📊 Resumen de llamadas: {llamadas_exitosas} exitosas, {llamadas_fallidas} fallidas")
-    else:
-        print("⚠️ Twilio no configurado correctamente. Llamadas deshabilitadas.")
+        if not telefono:
+            continue
+            
+        # 🚫 OMITIR llamada si es el usuario que reportó la emergencia
+        if telegram_id_reportante and telegram_id_miembro == telegram_id_reportante:
+            print(f"🚫 Omitiendo llamada al reportante: {miembro.get('nombre')} ({telefono})")
+            llamadas_omitidas += 1
+            continue
+            
+        try:
+            client.calls.create(
+                twiml='<Response><Say voice="alice" language="es-ES">Emergencia. Alarma vecinal. Revisa tu celular.</Say></Response>',
+                from_=TWILIO_FROM_NUMBER,
+                to=telefono
+            )
+            print(f"📞 Llamada iniciada a {miembro.get('nombre')}: {telefono}")
+            llamadas_realizadas += 1
+        except Exception as e:
+            print(f"❌ Error al llamar a {telefono}: {e}")
+
+    print(f"📊 Resumen de llamadas: {llamadas_realizadas} realizadas, {llamadas_omitidas} omitidas")
 
     return jsonify({'status': f'Alerta enviada a la comunidad {comunidad}'}), 200
 
@@ -251,43 +252,6 @@ def webhook_telegram():
             
             # Enviar respuesta visual
             enviar_mensaje_telegram(chat_id, mensaje_registro)
-        
-        # 🔧 Comando de diagnóstico de Twilio
-        elif text == 'diagnostico':
-            comunidad = obtener_comunidad_por_chat_id(chat_id)
-            if not comunidad:
-                enviar_mensaje_telegram(chat_id, "❌ Este chat no está registrado.")
-                return jsonify({'status': 'ok'})
-            
-            # Crear mensaje de diagnóstico
-            estado_twilio = "✅ CONFIGURADO" if (client and TWILIO_FROM_NUMBER) else "❌ NO CONFIGURADO"
-            
-            diagnostico = f"""🔧 <b>DIAGNÓSTICO DEL SISTEMA</b>
-            
-<b>Comunidad:</b> {comunidad.upper()}
-<b>Estado Twilio:</b> {estado_twilio}
-<b>Número origen:</b> {TWILIO_FROM_NUMBER or 'NO CONFIGURADO'}
-
-<b>Miembros registrados:</b>"""
-            
-            # Agregar información de miembros
-            try:
-                archivo_comunidad = os.path.join(DATA_FILE, f"{comunidad}.json")
-                if os.path.exists(archivo_comunidad):
-                    with open(archivo_comunidad, 'r', encoding='utf-8') as f:
-                        datos = json.load(f)
-                    
-                    miembros = datos.get('miembros', [])
-                    for i, miembro in enumerate(miembros, 1):
-                        nombre = miembro.get('nombre', 'Sin nombre')
-                        telefono = miembro.get('telefono', 'Sin teléfono')
-                        diagnostico += f"\n{i}. {nombre} - {telefono}"
-                else:
-                    diagnostico += "\n❌ No se encontró archivo de comunidad"
-            except Exception as e:
-                diagnostico += f"\n❌ Error: {e}"
-            
-            enviar_mensaje_telegram(chat_id, diagnostico)
         
         return jsonify({'status': 'ok'})
         
