@@ -1,12 +1,12 @@
-# ============================================================================
-# SISTEMA DE ALERTA VECINAL - SERVIDOR FLASK
-# ============================================================================
-# Este servidor maneja todo el sistema de alertas vecinales, incluyendo:
-# - Webhook de Telegram para recibir comandos
-# - API para enviar alertas de emergencia
+# ===============================================================================
+# 🚨 SISTEMA DE EMERGENCIA VECINAL - SERVIDOR PRINCIPAL
+# ===============================================================================
+# Este archivo maneja todas las operaciones del backend:
+# - Recepción de alertas de emergencia
+# - Envío de mensajes a Telegram
 # - Llamadas telefónicas automáticas con Twilio
-# - Gestión de comunidades y miembros
-# ============================================================================
+# - Gestión de comunidades y usuarios
+# ===============================================================================
 
 from flask import Flask, request, jsonify, render_template, Response
 from flask_cors import CORS
@@ -19,239 +19,189 @@ import requests
 from twilio.rest import Client
 from twilio.twiml.voice_response import VoiceResponse
 
-# ============================================================================
-# CONFIGURACIÓN INICIAL DEL SERVIDOR
-# ============================================================================
+# ===============================================================================
+# 🔧 CONFIGURACIÓN INICIAL DEL SERVIDOR
+# ===============================================================================
 
-app = Flask(__name__)
-CORS(app)  # Permite peticiones desde cualquier origen (necesario para WebApps)
+app = Flask(__name__)  # Crear la aplicación Flask
+CORS(app)  # Permitir peticiones desde otros dominios (cross-origin)
 
 # 📁 Ruta donde están almacenados los archivos JSON de cada comunidad
-# Cada comunidad tiene su propio archivo JSON con datos de miembros
 DATA_FILE = os.path.join(os.path.dirname(__file__), 'comunidades')
 
-# 🔑 Variables de entorno para credenciales de servicios externos
-# Estas se configuran en Railway/Heroku y nunca se hardcodean
-TWILIO_ACCOUNT_SID = os.getenv('TWILIO_ACCOUNT_SID')  # ID de cuenta Twilio
-TWILIO_AUTH_TOKEN = os.getenv('TWILIO_AUTH_TOKEN')    # Token de autenticación Twilio
-TWILIO_FROM_NUMBER = os.getenv('TWILIO_FROM_NUMBER')  # Número desde el cual llamar
+# 🔑 Variables de entorno para credenciales de Twilio (llamadas)
+TWILIO_ACCOUNT_SID = os.getenv('TWILIO_ACCOUNT_SID')    # ID de cuenta Twilio
+TWILIO_AUTH_TOKEN = os.getenv('TWILIO_AUTH_TOKEN')      # Token de autenticación
+TWILIO_FROM_NUMBER = os.getenv('TWILIO_FROM_NUMBER')    # Número desde el cual se hacen llamadas
 
-TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')  # Token del bot de Telegram
+# 🤖 Token del bot de Telegram para enviar mensajes
+TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 
-# 🌐 URL base del servidor (se usa para generar links de WebApp)
-# En producción será algo como https://tu-app.railway.app
+# 🌐 URL base del servidor (se usa para generar enlaces del botón de emergencia)
 BASE_URL = os.getenv('BASE_URL', 'https://tu-servidor.com')
 
-# 🎯 Cliente de Twilio para realizar llamadas telefónicas
+# 🎯 Cliente Twilio inicializado para hacer llamadas
 client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 
-# ============================================================================
-# SISTEMA DE SEGUIMIENTO DE USUARIOS
-# ============================================================================
-# Este diccionario es CLAVE para resolver el problema original
-# Almacena temporalmente qué usuario específico activó SOS en cada comunidad
-# 
-# Estructura: {'nombre_comunidad': telegram_user_id}
-# Ejemplo: {'villa': 1667177404, 'sanjuan': 9876543210}
-# 
-# ¿Por qué es necesario?
-# - Cuando un usuario escribe "SOS", necesitamos recordar quién fue
-# - Cuando se envía la alerta después, usamos esta info para identificarlo
-# - Se limpia automáticamente después de usar para evitar conflictos
+# 📝 Diccionario temporal para recordar qué usuario activó SOS en cada comunidad
+# Formato: {"nombre_comunidad": "telegram_user_id"}
 usuarios_sos_activos = {}
 
-# ============================================================================
-# RUTAS DEL SERVIDOR WEB
-# ============================================================================
+# ===============================================================================
+# 🌐 RUTAS WEB - PÁGINAS Y APIs
+# ===============================================================================
 
-# 🌐 Ruta principal - Sirve la página HTML del botón de emergencia
 @app.route('/')
 def index():
     """
-    Sirve el archivo index.html que contiene el formulario de emergencia
-    Esta página se abre cuando el usuario hace click en el botón de Telegram
+    📄 Página principal del sistema de emergencia
+    Renderiza el HTML donde está el botón de emergencia
     """
     return render_template('index.html')
 
-# 🔍 API para obtener lista de todas las comunidades disponibles
 @app.route('/api/comunidades')
 def listar_comunidades():
     """
-    Devuelve un JSON con todas las comunidades disponibles
-    Lee todos los archivos .json en la carpeta 'comunidades'
-    
-    Ejemplo de respuesta: ["villa", "sanjuan", "pueblo_libre"]
+    📋 API para obtener lista de todas las comunidades disponibles
+    Lee la carpeta 'comunidades' y devuelve nombres de archivos JSON
     """
     comunidades = []
-    if os.path.exists(DATA_FILE):
-        # Recorre todos los archivos en la carpeta comunidades
-        for archivo in os.listdir(DATA_FILE):
+    if os.path.exists(DATA_FILE):  # Verificar que la carpeta existe
+        for archivo in os.listdir(DATA_FILE):  # Recorrer todos los archivos
             if archivo.endswith('.json'):  # Solo archivos JSON
-                # Remueve la extensión .json para obtener el nombre de la comunidad
+                # Quitar la extensión .json del nombre
                 comunidades.append(archivo.replace('.json', ''))
-    return jsonify(comunidades)
+    return jsonify(comunidades)  # Devolver como JSON
 
-# 📍 API para obtener miembros de una comunidad específica
 @app.route('/api/ubicaciones/<comunidad>')
 def ubicaciones_de_comunidad(comunidad):
     """
-    Devuelve la información de todos los miembros de una comunidad
-    
-    Args:
-        comunidad (str): Nombre de la comunidad (ej: "villa")
-    
-    Returns:
-        JSON con lista de miembros o error 404 si no existe
-    
-    Ejemplo de uso: GET /api/ubicaciones/villa
+    📍 API para obtener miembros de una comunidad específica
+    Parámetro: nombre de la comunidad (ej: "villa", "sanjuan")
+    Retorna: lista de miembros con sus datos (nombre, teléfono, dirección, etc.)
     """
-    # Construye la ruta al archivo JSON de la comunidad
+    # Construir ruta al archivo JSON de la comunidad
     path = os.path.join(DATA_FILE, f"{comunidad}.json")
     
-    # Verifica si el archivo existe
+    # Verificar que el archivo existe
     if not os.path.exists(path):
         return jsonify({"error": "Comunidad no encontrada"}), 404
     
-    # Lee y parsea el archivo JSON
+    # Leer el archivo JSON
     with open(path, 'r', encoding='utf-8') as f:
         data = json.load(f)
 
-    # Maneja diferentes estructuras de JSON
+    # Si el JSON tiene estructura {"miembros": [...]} extraer solo miembros
     if isinstance(data, dict):
-        # Si es un diccionario, busca la clave "miembros"
         return jsonify(data.get("miembros", []))
     else:
-        # Si es una lista directa, la devuelve tal como está
+        # Si es directamente una lista, devolverla tal como está
         return jsonify(data)
 
-# ============================================================================
-# ENDPOINT PRINCIPAL - PROCESAMIENTO DE ALERTAS
-# ============================================================================
+# ===============================================================================
+# 🚨 FUNCIÓN PRINCIPAL - PROCESAR ALERTA DE EMERGENCIA
+# ===============================================================================
 
 @app.route('/api/alert', methods=['POST'])
 def recibir_alerta():
     """
-    🚨 ENDPOINT MÁS IMPORTANTE DEL SISTEMA 🚨
+    🚨 FUNCIÓN PRINCIPAL: Procesa una alerta de emergencia
     
-    Recibe una alerta de emergencia y realiza todas las acciones necesarias:
-    1. Identifica al usuario que envió la alerta
-    2. Envía mensaje a Telegram con todos los detalles
-    3. Realiza llamadas automáticas a todos los miembros
-    4. Registra la actividad en logs
+    Flujo:
+    1. Recibe datos del botón de emergencia (descripción, ubicación, comunidad)
+    2. Identifica quién envió la alerta
+    3. Envía mensaje a grupo de Telegram
+    4. Llama por teléfono a TODOS los miembros EXCEPTO al que reportó
     
-    Este endpoint es llamado desde script.js cuando el usuario presiona
-    el botón "Enviar Alerta Roja"
+    ⭐ CARACTERÍSTICA PRINCIPAL: No llama al reportante para mantener discreción
     """
     
-    # ========================================================================
-    # PASO 1: RECEPCIÓN Y VALIDACIÓN DE DATOS
-    # ========================================================================
-    
-    # Obtiene los datos JSON enviados desde el navegador
+    # 📦 Obtener datos enviados desde el frontend
     data = request.get_json()
-    print("📦 Datos recibidos:", data)  # Log para debugging
+    print("📦 Datos recibidos:", data)
 
-    # Extrae cada campo del JSON recibido
-    tipo = data.get('tipo')                    # Tipo de alerta (siempre "Alerta Roja Activada")
-    descripcion = data.get('descripcion')      # Texto escrito por el usuario
-    ubicacion = data.get('ubicacion', {})      # Coordenadas {lat, lon}
-    direccion = data.get('direccion')          # Dirección del usuario
+    # 🔍 Extraer información específica del payload
+    tipo = data.get('tipo')                    # Tipo de alerta
+    descripcion = data.get('descripcion')      # Descripción de la emergencia
+    ubicacion = data.get('ubicacion', {})      # Coordenadas lat/lon
+    direccion = data.get('direccion')          # Dirección en texto
     comunidad = data.get('comunidad')          # Nombre de la comunidad
-    telegram_user_id = data.get('telegram_user_id')  # 🎯 ID del usuario de Telegram (NUEVO)
+    telegram_user_id = data.get('telegram_user_id')  # 🎯 ID del usuario que reporta
 
-    # Extrae coordenadas específicas
     lat = ubicacion.get('lat')  # Latitud
     lon = ubicacion.get('lon')  # Longitud
 
-    # Validación básica - todos estos campos son obligatorios
+    # ✅ Validación: verificar que tenemos los datos mínimos necesarios
     if not descripcion or not lat or not lon or not comunidad:
         return jsonify({'error': 'Faltan datos'}), 400
 
-    # ========================================================================
-    # PASO 2: CARGA DE DATOS DE LA COMUNIDAD
-    # ========================================================================
-    
-    # Construye la ruta al archivo JSON de la comunidad
+    # 📂 Cargar archivo JSON de la comunidad
     archivo_comunidad = os.path.join(DATA_FILE, f"{comunidad}.json")
-    
-    # Verifica que la comunidad exista
     if not os.path.exists(archivo_comunidad):
         return jsonify({'error': 'Comunidad no encontrada'}), 404
 
-    # Lee el archivo JSON con todos los datos de la comunidad
     with open(archivo_comunidad, 'r', encoding='utf-8') as f:
         datos_comunidad = json.load(f)
 
-    # Extrae información específica del JSON
-    miembros = datos_comunidad.get('miembros', [])           # Lista de todos los miembros
-    telegram_chat_id = datos_comunidad.get('telegram_chat_id')  # ID del grupo de Telegram
+    # 📋 Extraer lista de miembros y chat_id de Telegram
+    miembros = datos_comunidad.get('miembros', [])
+    telegram_chat_id = datos_comunidad.get('telegram_chat_id')
 
-    # ========================================================================
-    # PASO 3: IDENTIFICACIÓN DEL USUARIO QUE REPORTA (PARTE CRUCIAL)
-    # ========================================================================
-    # Esta es la solución al problema original
-    # Antes siempre usaba miembros[0], ahora identifica al usuario real
+    # ===============================================================================
+    # 🎯 IDENTIFICACIÓN DEL USUARIO QUE REPORTA LA EMERGENCIA
+    # ===============================================================================
     
     miembro_reportante = None
     
-    # 🎯 PRIORIDAD 1: Buscar por telegram_user_id enviado directamente
-    # Esto sucede cuando el JavaScript logra capturar el user_id de la URL
+    # 🥇 PRIORIDAD 1: Si tenemos telegram_user_id en la URL, buscar por ese ID
     if telegram_user_id:
-        print(f"🔍 Buscando usuario por Telegram ID: {telegram_user_id}")
         for miembro in miembros:
-            # Compara los IDs (convertidos a string para evitar problemas de tipo)
+            # Comparar IDs como strings para evitar problemas de tipos
             if str(miembro.get('telegram_id')) == str(telegram_user_id):
                 miembro_reportante = miembro
-                print(f"✅ Usuario encontrado por Telegram ID: {miembro['nombre']}")
+                print(f"👤 Usuario encontrado por Telegram ID: {miembro['nombre']}")
                 break
     
-    # 🎯 PRIORIDAD 2: Buscar en usuarios_sos_activos
-    # Esto sucede cuando el usuario escribió SOS y esa info se guardó temporalmente
+    # 🥈 PRIORIDAD 2: Si no hay telegram_user_id, buscar en usuarios_sos_activos
+    # (esto pasa cuando alguien escribió "sos" pero no se pasó el ID en la URL)
     if not miembro_reportante and comunidad in usuarios_sos_activos:
         user_id_sos = usuarios_sos_activos[comunidad]
-        print(f"🔍 Buscando usuario por SOS activo: {user_id_sos}")
         for miembro in miembros:
             if str(miembro.get('telegram_id')) == str(user_id_sos):
                 miembro_reportante = miembro
-                print(f"✅ Usuario encontrado por SOS activo: {miembro['nombre']}")
-                # 🧹 IMPORTANTE: Limpiar el registro después de usar
-                # Esto evita que se use para alertas futuras de otros usuarios
+                print(f"👤 Usuario encontrado por SOS activo: {miembro['nombre']}")
+                # Limpiar el registro después de usar
                 del usuarios_sos_activos[comunidad]
                 break
     
-    # 🎯 FALLBACK: Si no se puede identificar, usar el primer miembro
-    # Esto mantiene compatibilidad con versiones anteriores
+    # 🥉 FALLBACK: Si no encontramos al usuario específico, usar el primer miembro
     if not miembro_reportante and miembros:
         miembro_reportante = miembros[0]
         print("⚠️ No se pudo identificar al usuario específico, usando el primer miembro como fallback")
     
-    # ========================================================================
-    # PASO 4: PREPARACIÓN DE DATOS PARA LA NOTIFICACIÓN
-    # ========================================================================
-    
-    # Usa los datos del miembro identificado (¡esta es la corrección principal!)
+    # 📝 Preparar información del reportante para el mensaje
     if miembro_reportante:
         nombre_reportante = miembro_reportante.get('nombre', 'Usuario desconocido')
         direccion_reportante = miembro_reportante.get('direccion', direccion or 'Dirección no disponible')
         
-        # 🎯 MANEJO DE GEOLOCALIZACIÓN
-        # Si el usuario NO activó "ubicación en tiempo real", usar la predeterminada del JSON
+        # 🗺️ Decidir qué coordenadas usar:
+        # Si están usando ubicación en tiempo real, mantener lat/lon recibidos
+        # Si no, usar la ubicación predeterminada del miembro del JSON
         if not data.get('ubicacion_tiempo_real', False):
             geo_miembro = miembro_reportante.get('geolocalizacion', {})
             if geo_miembro:
-                lat = geo_miembro.get('lat', lat)  # Usa coordenadas del JSON
+                lat = geo_miembro.get('lat', lat)
                 lon = geo_miembro.get('lon', lon)
     else:
-        # Si no se encuentra ningún miembro, usar valores por defecto
+        # Si no se encontró ningún miembro, usar datos genéricos
         nombre_reportante = 'Usuario desconocido'
         direccion_reportante = direccion or 'Dirección no disponible'
 
-    # ========================================================================
-    # PASO 5: CREACIÓN DEL MENSAJE DE ALERTA
-    # ========================================================================
+    # ===============================================================================
+    # 📱 ENVÍO DE MENSAJE A TELEGRAM
+    # ===============================================================================
     
-    # Construye el mensaje HTML que se enviará a Telegram
-    # Usa formato HTML para hacer el mensaje más legible y profesional
+    # 📝 Construir mensaje formateado para Telegram
     mensaje = f"""
 🚨 <b>ALERTA VECINAL</b> 🚨
 
@@ -263,193 +213,183 @@ def recibir_alerta():
 <b>🕐 Hora:</b> {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}
 """
 
-    # ========================================================================
-    # PASO 6: ENVÍO DE NOTIFICACIONES
-    # ========================================================================
-    
-    # 📱 Envía el mensaje al grupo de Telegram
+    # 📤 Enviar mensaje al grupo de Telegram de la comunidad
     enviar_telegram(telegram_chat_id, mensaje)
 
-    # 📞 Realiza llamadas automáticas a todos los miembros de la comunidad
-    # Esto asegura que incluso si alguien no ve el mensaje de Telegram, reciba una llamada
+    # ===============================================================================
+    # 📞 LLAMADAS TELEFÓNICAS AUTOMÁTICAS (EXCLUYENDO AL REPORTANTE)
+    # ===============================================================================
+    
+    # 🎯 NUEVA LÓGICA: Llamar a todos los miembros EXCEPTO al que activó la alarma
+    telegram_id_reportante = None
+    
+    # Determinar el telegram_id del usuario que reporta
+    if telegram_user_id:
+        telegram_id_reportante = str(telegram_user_id)
+    elif comunidad in usuarios_sos_activos:
+        telegram_id_reportante = str(usuarios_sos_activos[comunidad])
+    
+    print(f"🚫 No se llamará al usuario con Telegram ID: {telegram_id_reportante}")
+    
+    # 📊 Contadores para estadísticas
+    llamadas_realizadas = 0
+    llamadas_omitidas = 0
+    
+    # 🔄 Iterar por todos los miembros de la comunidad
     for miembro in miembros:
         telefono = miembro.get('telefono')
-        if not telefono:
-            continue  # Salta miembros sin teléfono
+        telegram_id_miembro = str(miembro.get('telegram_id', ''))
         
+        # ⏭️ Saltar si no tiene número de teléfono
+        if not telefono:
+            continue
+            
+        # 🚫 FILTRO PRINCIPAL: Omitir llamada si es el usuario que reportó
+        if telegram_id_reportante and telegram_id_miembro == telegram_id_reportante:
+            print(f"🚫 Omitiendo llamada al reportante: {miembro.get('nombre')} ({telefono})")
+            llamadas_omitidas += 1
+            continue  # Pasar al siguiente miembro
+            
+        # 📞 Realizar llamada automática usando Twilio
         try:
-            # Crea una llamada automática con mensaje de voz en español
             client.calls.create(
+                # 🎙️ Mensaje de voz en español que se reproduce al contestar
                 twiml='<Response><Say voice="alice" language="es-ES">Emergencia. Alarma vecinal. Revisa tu celular.</Say></Response>',
-                from_=TWILIO_FROM_NUMBER,  # Número Twilio configurado
-                to=telefono               # Número del miembro
+                from_=TWILIO_FROM_NUMBER,  # Número desde el cual se llama
+                to=telefono                # Número destino
             )
-            print(f"📞 Llamada iniciada a {telefono}")
+            print(f"📞 Llamada iniciada a {miembro.get('nombre')}: {telefono}")
+            llamadas_realizadas += 1
         except Exception as e:
-            # Si falla una llamada, continúa con las demás
+            # 🚨 Manejar errores en llamadas (número inválido, saldo insuficiente, etc.)
             print(f"❌ Error al llamar a {telefono}: {e}")
 
-    # ========================================================================
-    # PASO 7: RESPUESTA AL CLIENTE
-    # ========================================================================
-    
-    # Responde al JavaScript que todo salió bien
+    # 📊 Mostrar resumen de llamadas realizadas
+    print(f"📊 Resumen de llamadas: {llamadas_realizadas} realizadas, {llamadas_omitidas} omitidas")
+
+    # ✅ Responder al frontend que la alerta se procesó correctamente
     return jsonify({'status': f'Alerta enviada a la comunidad {comunidad}'}), 200
 
-# ============================================================================
-# WEBHOOK DE TELEGRAM - RECEPCIÓN DE COMANDOS
-# ============================================================================
+# ===============================================================================
+# 🤖 WEBHOOK DE TELEGRAM - MANEJO DE COMANDOS
+# ===============================================================================
 
 @app.route('/webhook/telegram', methods=['POST'])
 def webhook_telegram():
     """
-    🤖 WEBHOOK PRINCIPAL DE TELEGRAM 🤖
+    🤖 Webhook que recibe mensajes desde Telegram
     
-    Este endpoint recibe TODOS los mensajes enviados al bot de Telegram
-    Telegram hace una petición POST aquí cada vez que alguien:
-    - Escribe un mensaje al bot
-    - Escribe un mensaje en un grupo donde está el bot
-    - Presiona un botón inline
-    - Etc.
-    
-    COMANDOS SOPORTADOS:
-    - "sos" (sin barra): Activa el botón de emergencia
-    - "MIREGISTRO2222": Registra al usuario en los logs
+    Comandos que maneja:
+    - "sos" → Genera botón de emergencia
+    - "miregistro2222" → Registra usuario en logs
     """
     try:
-        # ====================================================================
-        # PASO 1: PROCESAMIENTO DEL WEBHOOK
-        # ====================================================================
-        
-        # Obtiene los datos JSON enviados por Telegram
+        # 📨 Recibir datos del webhook de Telegram
         data = request.get_json()
-        print("📨 Webhook recibido:", data)  # Log completo para debugging
+        print("📨 Webhook recibido:", data)
         
-        # Verifica que sea un mensaje válido
-        # Telegram puede enviar otros tipos de updates (inline queries, etc.)
+        # ✅ Verificar que es un mensaje (no una edición u otro evento)
         if 'message' not in data:
-            return jsonify({'status': 'ok'})  # Ignora updates que no sean mensajes
+            return jsonify({'status': 'ok'})
         
-        # ====================================================================
-        # PASO 2: EXTRACCIÓN DE INFORMACIÓN DEL MENSAJE
-        # ====================================================================
-        
+        # 📝 Extraer información del mensaje
         message = data['message']
-        chat_id = message['chat']['id']                    # ID del chat/grupo
-        text = message.get('text', '').strip().lower()     # Texto del mensaje (en minúsculas)
+        chat_id = message['chat']['id']           # ID del chat/grupo
+        text = message.get('text', '').strip().lower()  # Texto del mensaje en minúsculas
         
-        # Información del usuario que envió el mensaje
+        # 👤 Información del usuario que envió el mensaje
         user = message.get('from', {})
-        user_id = user.get('id')                          # 🎯 ID único del usuario (CLAVE)
-        first_name = user.get('first_name', 'Sin nombre') # Nombre del usuario
-        username = user.get('username', 'Sin username')   # @username del usuario
+        user_id = user.get('id')                  # ID único del usuario
+        first_name = user.get('first_name', 'Sin nombre')
+        username = user.get('username', 'Sin username')
         
-        # ====================================================================
-        # PASO 3: PROCESAMIENTO DEL COMANDO "SOS"
-        # ====================================================================
+        # ===============================================================================
+        # 🚨 COMANDO "SOS" - ACTIVAR BOTÓN DE EMERGENCIA
+        # ===============================================================================
         
-        if text == 'sos':  # Usuario escribió "sos" (sin barra /)
-            print(f"🚨 Comando SOS recibido de {first_name} (ID: {user_id})")
-            
-            # Busca a qué comunidad pertenece este chat
+        if text == 'sos':
+            # 🔍 Buscar a qué comunidad pertenece este chat
             comunidad = obtener_comunidad_por_chat_id(chat_id)
             
             if not comunidad:
-                # Si el chat no está registrado en ninguna comunidad
                 enviar_mensaje_telegram(chat_id, "❌ Este chat no está registrado en ninguna comunidad.")
                 return jsonify({'status': 'ok'})
             
-            # 🎯 PARTE CRUCIAL: GUARDAR QUIÉN ACTIVÓ SOS
-            # Esto es lo que permite identificar al usuario después
+            # 🎯 GUARDAR el user_id que activó SOS para poder identificarlo después
             usuarios_sos_activos[comunidad] = user_id
-            print(f"💾 SOS activado por usuario {first_name} (ID: {user_id}) en comunidad {comunidad}")
+            print(f"👤 SOS activado por usuario {first_name} (ID: {user_id}) en comunidad {comunidad}")
             
-            # Crea la URL del WebApp incluyendo tanto la comunidad como el user_id
-            # Esta URL es la que se abrirá cuando el usuario presione el botón
+            # 🔗 Crear URL del botón de emergencia incluyendo comunidad y user_id
             webapp_url = f"{BASE_URL}?comunidad={comunidad}&user_id={user_id}"
             
-            # Crea el botón inline que aparecerá en Telegram
+            # ⌨️ Crear teclado inline con botón que abre la web app
             keyboard = {
                 "inline_keyboard": [[
                     {
                         "text": "🚨 ABRIR BOTÓN DE EMERGENCIA 🚨",
-                        "url": webapp_url  # Cuando se presiona, abre esta URL
+                        "url": webapp_url  # Al tocar este botón abre la web app
                     }
                 ]]
             }
             
-            # Envía un mensaje con el botón
-            mensaje_respuesta = "🚨"  # Mensaje simple pero efectivo
+            mensaje_respuesta = "🚨"  # Mensaje simple que acompaña al botón
+            
+            # 📤 Enviar mensaje con el botón
             enviar_mensaje_telegram(chat_id, mensaje_respuesta, keyboard)
         
-        # ====================================================================
-        # PASO 4: PROCESAMIENTO DEL COMANDO "MIREGISTRO2222"
-        # ====================================================================
+        # ===============================================================================
+        # 📋 COMANDO "MIREGISTRO2222" - REGISTRAR USUARIO
+        # ===============================================================================
         
-        elif text == 'miregistro2222':  # Comando especial para registrar usuarios
-            # Registra información del usuario en los logs del servidor
-            # Útil para debugging y administración
-            chat_title = message.get('chat', {}).get('title', 'Chat privado')
-            print(f"👤 REGISTRO: Usuario '{first_name}' (@{username}) - ID: {user_id} - Chat: {chat_title} ({chat_id})")
+        elif text == 'miregistro2222':
+            # 📝 Registrar información del usuario en logs (para debugging)
+            print(f"👤 REGISTRO: Usuario '{first_name}' (@{username}) - ID: {user_id} - Chat: {message.get('chat', {}).get('title', 'Chat privado')} ({chat_id})")
             
-            # Mensaje de confirmación con formato ASCII art
+            # 🎨 Mensaje de confirmación visual bonito
             mensaje_registro = """  ┏━━━━━━━━━━━━━━━━━━━┓
   ┃  👐 REGISTRADO 👐  ┃
   ┗━━━━━━━━━━━━━━━━━━━┛
   🦾 Bienvenido al sistema 🦾"""
             
-            # Envía la confirmación al usuario
+            # 📤 Enviar confirmación
             enviar_mensaje_telegram(chat_id, mensaje_registro)
         
-        # Respuesta exitosa a Telegram (siempre devolver 200)
         return jsonify({'status': 'ok'})
         
     except Exception as e:
-        # Si algo sale mal, loggea el error pero responde OK a Telegram
-        # Esto evita que Telegram reintente el webhook infinitamente
+        # 🚨 Manejar cualquier error en el webhook
         print(f"❌ Error en webhook: {e}")
         return jsonify({'status': 'error'}), 500
 
-# ============================================================================
-# FUNCIONES AUXILIARES
-# ============================================================================
+# ===============================================================================
+# 🔍 FUNCIONES AUXILIARES
+# ===============================================================================
 
 def obtener_comunidad_por_chat_id(chat_id):
     """
-    🔍 FUNCIÓN CLAVE PARA IDENTIFICAR COMUNIDADES
+    🔍 Busca qué comunidad corresponde a un chat_id de Telegram
     
-    Busca qué comunidad corresponde a un chat_id específico de Telegram
+    Recorre todos los archivos JSON en la carpeta 'comunidades'
+    y busca cuál tiene el telegram_chat_id que coincide
     
-    ¿Cómo funciona?
-    1. Lee todos los archivos JSON de la carpeta 'comunidades'
-    2. Busca el que tenga el telegram_chat_id coincidente
-    3. Devuelve el nombre de esa comunidad
-    
-    Args:
-        chat_id (int): ID del chat/grupo de Telegram
-        
-    Returns:
-        str: Nombre de la comunidad o None si no se encuentra
-        
-    Ejemplo:
-        chat_id = -1002525690225
-        return = "villa"
+    Parámetro: chat_id (ID del grupo de Telegram)
+    Retorna: nombre de la comunidad o None si no se encuentra
     """
     if not os.path.exists(DATA_FILE):
         return None
     
-    # Recorre todos los archivos JSON
+    # 🔄 Recorrer todos los archivos JSON de comunidades
     for archivo in os.listdir(DATA_FILE):
         if archivo.endswith('.json'):
             path = os.path.join(DATA_FILE, archivo)
             try:
+                # 📖 Leer archivo JSON
                 with open(path, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                 
-                # Verifica si el telegram_chat_id coincide
-                # Convierte ambos a string para evitar problemas de tipo
+                # ✅ Verificar si el chat_id coincide
                 if data.get('telegram_chat_id') == str(chat_id):
-                    # Devuelve el nombre de la comunidad (sin .json)
+                    # Retornar nombre de comunidad (nombre del archivo sin .json)
                     return archivo.replace('.json', '')
             except Exception as e:
                 print(f"❌ Error leyendo {archivo}: {e}")
@@ -457,33 +397,34 @@ def obtener_comunidad_por_chat_id(chat_id):
     
     return None  # No se encontró la comunidad
 
+# ===============================================================================
+# 📡 FUNCIONES DE TELEGRAM
+# ===============================================================================
+
 def enviar_telegram(chat_id, mensaje):
     """
-    📡 FUNCIÓN PARA ENVIAR MENSAJES SIMPLES A TELEGRAM
+    📡 Envía un mensaje simple a un grupo de Telegram
     
-    Esta función se usa para enviar las alertas de emergencia
-    Utiliza la API HTTP de Telegram directamente
-    
-    Args:
-        chat_id (str): ID del chat/grupo donde enviar
-        mensaje (str): Texto del mensaje (puede incluir HTML)
+    Parámetros:
+    - chat_id: ID del grupo donde enviar
+    - mensaje: texto a enviar (soporta HTML)
     """
     if not chat_id:
         print("❌ No se encontró chat_id de Telegram para esta comunidad.")
         return
 
-    # URL de la API de Telegram para enviar mensajes
+    # 🌐 URL de la API de Telegram para enviar mensajes
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     
-    # Payload con los datos del mensaje
+    # 📦 Payload con los datos del mensaje
     payload = {
         "chat_id": chat_id,
         "text": mensaje,
-        "parse_mode": "HTML"  # Permite usar <b>, <i>, etc. en el mensaje
+        "parse_mode": "HTML"  # Permite usar etiquetas HTML como <b>, <i>
     }
 
     try:
-        # Realiza la petición POST a Telegram
+        # 📤 Hacer petición POST a la API de Telegram
         response = requests.post(url, json=payload)
         if response.ok:
             print(f"✅ Mensaje Telegram enviado al grupo {chat_id}")
@@ -494,15 +435,12 @@ def enviar_telegram(chat_id, mensaje):
 
 def enviar_mensaje_telegram(chat_id, mensaje, keyboard=None):
     """
-    📡 FUNCIÓN PARA ENVIAR MENSAJES CON BOTONES A TELEGRAM
+    📡 Envía un mensaje a Telegram con teclado inline opcional
     
-    Similar a enviar_telegram() pero permite incluir botones inline
-    Se usa para enviar el botón de emergencia cuando alguien escribe SOS
-    
-    Args:
-        chat_id (str): ID del chat/grupo donde enviar
-        mensaje (str): Texto del mensaje
-        keyboard (dict, optional): Configuración de botones inline
+    Parámetros:
+    - chat_id: ID del grupo
+    - mensaje: texto del mensaje
+    - keyboard: (opcional) teclado con botones
     """
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     
@@ -512,7 +450,7 @@ def enviar_mensaje_telegram(chat_id, mensaje, keyboard=None):
         "parse_mode": "HTML"
     }
     
-    # Si se proporcionaron botones, los incluye
+    # ⌨️ Agregar teclado si se proporcionó
     if keyboard:
         payload["reply_markup"] = keyboard
 
@@ -525,72 +463,30 @@ def enviar_mensaje_telegram(chat_id, mensaje, keyboard=None):
     except Exception as e:
         print(f"❌ Excepción al enviar mensaje: {e}")
 
-# ============================================================================
-# RUTA PARA LLAMADAS DE VOZ (TWILIO)
-# ============================================================================
+# ===============================================================================
+# 🎤 TWILIO - MANEJO DE LLAMADAS
+# ===============================================================================
 
 @app.route('/twilio-voice', methods=['POST'])
 def twilio_voice():
     """
-    🎤 ENDPOINT PARA MANEJAR LLAMADAS TELEFÓNICAS
+    🎤 Endpoint que define qué se dice en las llamadas automáticas
     
-    Twilio llama a esta ruta cuando se establece una llamada
-    Devuelve TwiML (XML) con instrucciones sobre qué decir
-    
-    Returns:
-        XML: Instrucciones TwiML para Twilio
+    Twilio llama a esta URL cuando alguien contesta el teléfono
+    para saber qué mensaje reproducir
     """
     response = VoiceResponse()
-    # Configura el mensaje de voz en español con voz Alice
-    response.say(
-        "Emergencia. Alarma vecinal. Revisa tu celular.", 
-        voice='alice',      # Voz femenina de Twilio
-        language='es-ES'    # Español de España (más claro)
-    )
+    # 🗣️ Mensaje que se reproduce cuando contestan la llamada
+    response.say("Emergencia. Alarma vecinal. Revisa tu celular.", voice='alice', language='es-ES')
     return Response(str(response), mimetype='application/xml')
 
-# ============================================================================
-# INICIO DEL SERVIDOR
-# ============================================================================
+# ===============================================================================
+# ▶️ INICIO DEL SERVIDOR
+# ===============================================================================
 
 if __name__ == '__main__':
     """
-    ▶️ PUNTO DE ENTRADA DEL SERVIDOR
-    
-    Configuración para producción:
-    - host='0.0.0.0': Acepta conexiones desde cualquier IP
-    - port=8000: Puerto por defecto (Railway puede cambiarlo automáticamente)
+    🚀 Punto de entrada del servidor
+    Ejecuta la aplicación Flask en el puerto 8000
     """
     app.run(host='0.0.0.0', port=8000)
-
-# ============================================================================
-# FLUJO COMPLETO DEL SISTEMA:
-# ============================================================================
-# 
-# 1. CONFIGURACIÓN INICIAL:
-#    - Usuario agrega el bot a un grupo de Telegram
-#    - Se configura el webhook para que Telegram envíe mensajes a este servidor
-#    - Se crea un archivo JSON con los datos de la comunidad
-# 
-# 2. ACTIVACIÓN DE EMERGENCIA:
-#    a. Usuario escribe "sos" en el grupo
-#    b. Telegram envía el mensaje al webhook (/webhook/telegram)
-#    c. El servidor identifica la comunidad y guarda el user_id
-#    d. Se envía un botón "ABRIR BOTÓN DE EMERGENCIA" al grupo
-# 
-# 3. APERTURA DEL FORMULARIO:
-#    a. Usuario presiona el botón
-#    b. Se abre la página web (/) con parámetros ?comunidad=X&user_id=Y
-#    c. El JavaScript carga y identifica al usuario específico
-# 
-# 4. ENVÍO DE ALERTA:
-#    a. Usuario llena el formulario y presiona "Enviar Alerta Roja"
-#    b. JavaScript envía POST a /api/alert con todos los datos
-#    c. Servidor identifica al usuario, prepara el mensaje y notifica
-# 
-# 5. NOTIFICACIONES:
-#    a. Se envía mensaje detallado al grupo de Telegram
-#    b. Se realizan llamadas automáticas a todos los miembros
-#    c. El sistema queda listo para la próxima emergencia
-# 
-# ============================================================================
